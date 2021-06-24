@@ -55,35 +55,56 @@ for ($i = 0; $i -lt $ifaceFolders.Count; $i++) {
     Write-Host "Found XML Files:";
     $networkConfigs = Get-ChildItem $fullPathToConfigs;
 
-    # LOOP THROUGH NETWORK CONFIGS
+    # LOOP THROUGH NETWORK CONFIGS IN WINDOWS DIR
     for ($j = 0; $j -lt $networkConfigs.Count; $j++) {
 
         $fullPathToConfig = "$($fullPathToConfigs)\$($networkConfigs[$j])"
         Write-Host "`t$($networkConfigs[$j])";
 
+        $network = [WifiNetwork]::new();
+
         # PARSE XML AND GET THE CONFIG
         [xml]$wifiConfig = Get-Content $fullPathToConfig;
-        $networkName = $wifiConfig.WLANProfile.name;
-        $keyType = $wifiConfig.WLANProfile.MSM.security.sharedKey.keyType;
-        $isProtected = $wifiConfig.WLANProfile.MSM.security.sharedKey.protected;
-        $keyMaterial = $wifiConfig.WLANProfile.MSM.security.sharedKey.keyMaterial;
+        $pattern = '(?<=\{).+?(?=\})'
+        $network.GUID = [regex]::Matches($networkConfigs[$j], $pattern).Value
+        $network.SSID = $wifiConfig.WLANProfile.name;
+        $network.KeyType = $wifiConfig.WLANProfile.MSM.security.sharedKey.keyType;
+        $network.IsProtected = $wifiConfig.WLANProfile.MSM.security.sharedKey.protected;
+        $network.KeyMaterial = $wifiConfig.WLANProfile.MSM.security.sharedKey.keyMaterial;
 
-        Write-Host "`t`tSSID: $($networkName)";
-        Write-Host "`t`tKey Type: $($keytype)";
-        Write-Host "`t`tIs Protected? $($isProtected)";
-        Write-Host "`t`tKey Material: $($keymaterial)";
-
-        if (!$keymaterial -or !$isProtected -or !$keyMaterial) {
-            Write-Host "`t`tMay be an enterprise network! Checking registry for credentials...";
-            <#
-            User
-            HKCU\Software\Microsoft\Wlansvc\UserData\Profiles\[GUID]
-
-            Machine
-            HKLM\Software\Microsoft\Wlansvc\UserData\Profiles\[GUID]#>
+        # IF THERE'S KEY MATERIAL, THEN DECRYPT IT AND ADD IT TO FOUND ONES. OTHERWISE, ADD IT TO THE LIST OF NOT FOUND ONES THAT WE'LL COME BACK TO 
+        if ($network.KeyMaterial) {
+            $keyBytes = [byte[]] ($network.KeyMaterial -replace '^0x' -split '(..)' -ne '' -replace '^', '0x');
+            try {
+                $decryptedNetworkKeyBytes = [System.Security.Cryptography.ProtectedData]::Unprotect($keyBytes,$null,[System.Security.Cryptography.DataProtectionScope]::LocalMachine);
+                $network.DecryptedKey =  [System.Text.Encoding]::UTF8.GetString($decryptedNetworkKeyBytes);
+            } catch [System.Security.Cryptography.CryptographicException] {
+                #Write-Host "`t`tAn error occurred for network $($network.SSID) ($($network.GUID)): $($_)";
+            }
+            
+            $foundNetworks += $network;
+        } else {
+            $notFoundNetworks += $network
         }
+    }
 
+    # NOW, FOR ANY NETWORKS WE COULDN'T FIND KEYS FOR, LET'S GO THROUGH THE REGISTRY AND LOOK FOR THEM
+    for ($a = 0; $a -lt $notFoundNetworks.Count; $a++) {
 
     }
+
+    # PRINT THE NETWORKS WE FOUND
+    
+    for ($a = 0; $a -lt $foundNetworks.Count; $a++) {
+        [WifiNetwork] $network = $foundNetworks[$a]
+        Write-Host "Got key for network: $($network.SSID): $($network.DecryptedKey)";
+    }
+    Write-Host "";
+    for ($a = 0; $a -lt $notFoundNetworks.Count; $a++) {
+        [WifiNetwork] $network = $notFoundNetworks[$a]
+        Write-Host "Failed to get key for network $($network.SSID) :(";
+    }
+
+
 
 }
