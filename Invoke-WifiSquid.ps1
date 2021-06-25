@@ -196,8 +196,45 @@ function Decrypt-DomainUsername {
 function Decrypt-DomainPassword {
     [OutputType([DomainCreds])]
     param (
-        [byte[]] $unprotectedBytes
+        [byte[]] $unprotectedBytes,
+        [DomainCreds] $domainCreds
     )
+
+    [byte[]] $searchForPassword = @( 0x01, 0x00, 0x00, 0x00, 0xD0, 0x8C, 0x9D, 0xDF, 0x01)
+
+    # CHECK FOR THE ENCRYPTED DATA CHUNK
+    [int] $passwordFieldStart = Find-SigScan -hayStack $unprotectedBytes -needle $searchForPassword
+    if ($passwordFieldStart -ne -1) {
+        Write-Host "`tFound password blob!"
+
+        try {
+            # TRY TO UNPROTECT THE PASSWORD - NEEDS TO BE RUN AS THE USER IN QUESTION
+            Write-Host "Trying to unprotect password"
+            [byte[]] $unprotectedPassword = [System.Security.Cryptography.ProtectedData]::Unprotect($unprotectedBytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine);
+
+            # STRIP NULL BYTES
+            for ($i = 0; $i -lt $unprotectedPassword.Length; $i++) {
+                if ($unprotectedPassword[$i] -eq 0x00) {
+                    Write-Host "Trimming null bytes from decrypted password"
+                    $unprotectedPassword = Get-ByteArraySlice -data $unprotectedPassword -startIndex 0 -endIndex $i 
+                    break;
+
+                }
+            }
+
+            $domainCreds.Password = [System.Text.Encoding]::UTF8.getString($unprotectedPassword)
+            $domainCreds.Complete = $true 
+            return $domainCreds
+        }
+        catch {
+            Write-Host "An error occurred: $($_) - Most likely you need to run this as the user who owns the password"
+            Write-Host "Trying a workaround to impersonate the target user with a scheduled task! This may take a few seconds..."
+            return $domainCreds
+        }
+    } else {
+        Write-Host "`tCould not find the start of the password field!"
+    }
+    return $domainCreds
 }
 # ENUM
 enum WifiNetworkCredType {
@@ -303,12 +340,10 @@ for ($i = 0; $i -lt $ifaceFolders.Count; $i++) {
 
 }
 
-# MOUNT HKCU
+# MOUNT HKEY_USERS
 New-PSDrive -Name HKU Registry HKEY_USERS;
 
-
 # NOW, FOR ANY NETWORKS WE COULDN'T FIND KEYS FOR, LET'S GO THROUGH THE REGISTRY AND LOOK FOR THEM
-
 # BUILD A LIST OF LOCAL USERS
 $users = Get-LocalUser;
 
@@ -360,6 +395,17 @@ for ($a = 0; $a -lt $notFoundNetworks.Count; $a++) {
                     # THEN, DECRYPT/DECIPHER IT FROM THE WEIRD FORMAT
                     [DomainCreds] $domainCreds = Decrypt-DomainUsername -unprotectedBytes $unprotectedKey
                     Write-Host $domainCreds
+                    $domainCreds = Decrypt-DomainPassword -unprotectedBytes $unprotectedKey -domainCreds $domainCreds
+                    Write-Host $domainCreds
+                    if ($domainCreds.Domain) {
+                        $network.DecryptedKey = "$($domainCreds.Domain)\$($domainCreds.Username):$($domainCreds.Password)"
+                    } else {
+                        $network.DecryptedKey = "$($domainCreds.Username):$($domainCreds.Password)"
+                    }
+
+                    $network.Domain
+
+                    $foundNetworks += $network
 
                 } catch {
                     Write-Host "`tFailed to Decrypt key! $($_)"
