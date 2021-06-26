@@ -1,5 +1,5 @@
 # Invoke-WifiSquid
-A powershell tool to decrypt DPAPI-encrypted WiFi Passwords.
+A powershell tool to decrypt DPAPI-encrypted WiFi Passwords. This tool _must_ be run as `NT Authority\System`. Use Psexec or something - I'm not packaging that inside of this.
 
 ## How it Works
 This is a 10,000 foot overview that I typed up very quickly - check out my medium blog kylemistele.medium.com for a full write-up (soon after this tool is published)
