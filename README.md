@@ -22,6 +22,5 @@ This is a 10,000 foot overview that I typed up very quickly - check out my mediu
 Then, once we grab and decrypt all the credentials we can, print them out and exit. 
 
 ## TODO
-* the binary file containing the encrypted password file and the text file containing the decrypted password are cleaned up, BUT the powershell script that the scheduled task uses needs to be erased
 * erase the scheduled task once it's finished
 * re-architect it so everything is nice and readable (some syntax is inconsistent and the script is a mess - I'm not a big powershell guy and was kind of lazy)
