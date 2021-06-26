@@ -12,6 +12,7 @@ enum WifiNetworkCredType {
 class DomainCreds {
     [string] $Domain 
     [string] $Username 
+    [string] $LocalUserName
     [string] $Password
     [bool] $Complete = $false 
 }
@@ -40,7 +41,6 @@ function Invoke-RunPowershellAsUser {
     $pathToTaskFile = "C:\users\public\$($randomStr).ps1"
 
     Set-Content -Path $pathToTaskFile -value $command
-    Write-Host "Command: $($command)"
 
     # CREATE A SCHEDULED TASK ACTION
     #$action = New-ScheduledtaskAction -Execute "powershell.exe -ExecutionPolicy Bypass -File `"$($pathToTaskFile)`""
@@ -92,12 +92,9 @@ function Invoke-RunPowershellAsUser {
     $taskUser = "$($domain)\$($user)"
     Write-Host "`tScheduling task for $($timeTrigger) as $($taskUser)"
     Write-Host "`tTask name: $taskName"
-    Write-Host "`tTask Command: $($command)"
-    
 
     Register-ScheduledTask -Action $action -Trigger $trigger -TaskName $taskName -User $user
     $task = Get-ScheduledTask -TaskName $taskName
-    Write-Host $task 
 }
 # SLICE AN ARRAY
 function Get-ByteArraySlice {
@@ -108,7 +105,6 @@ function Get-ByteArraySlice {
         [int] $startIndex = -1,
         [int] $endIndex = -1
     )
-    Write-Host "Slice called: ($($startIndex), $($endIndex))"
 
     if ($startIndex -lt 0) {
         Write-Host "Error: Slice start index cannot be < 0"
@@ -178,11 +174,13 @@ function Unprotect-DomainUsername {
 
     [OutputType([DomainCreds])]
     param (
-        [byte[]] $unprotectedBytes
+        [byte[]] $unprotectedBytes,
+        [string] $LocalUserName
     )
     
     Write-Host "Attempting to decrypt domain credentials!"
     [DomainCreds] $domainCreds = [DomainCreds]::new()
+    $domainCreds.LocalUserName = $LocalUserName
 
 
     # CONSTANTS THAT WE USE TO SEARCH THROUGH THE BLOB FOR THE USERNAME
@@ -215,18 +213,18 @@ function Unprotect-DomainUsername {
             # CHECK FOR A DOMAIN. IF WE REACHED 0xE6 THEN NO DOMAIN WAS FOUND
             if ($domainFieldStart -ne -1 -and $unprotectedBytes[$domainFieldStart] -ne 0xE6) {
 
-                Write-Host "Found beginning of domain field!"
+                Write-Host "`tFound beginning of domain field!"
                 [int] $domainFieldEnd = Find-ByteArraySubstring -hayStack $unprotectedBytes -needle $nullArray -startAt $domainFieldStart
 
                 if ($domainFieldEnd -ne -1) {
-                    Write-Host "Found the end of the domain field!"
+                    Write-Host "`tFound the end of the domain field!"
                     [byte[]] $possibleDomainField = Get-ByteArraySlice -data $unprotectedBytes -startIndex $domainFieldStart -endIndex $domainFieldEnd
                     $domainCreds.Domain = [System.Text.Encoding]::UTF8.GetString($possibleDomainField);
                 } else {
-                    Write-Host "Failedt to find end of the domain field!"
+                    Write-Host "`tFailed to find end of the domain field!"
                 }
             } else {
-                Write-Host "Failed to find beginning of domain field!"
+                Write-Host "`tFailed to find beginning of domain field, network doesn`'t require it."
             }
         } else {
             Write-Host "Failed to find end of username field!"
@@ -303,8 +301,9 @@ function Unprotect-DomainPassword
 
         try {
             # TRY TO UNPROTECT THE PASSWORD - NEEDS TO BE RUN AS THE USER IN QUESTION
-            Write-Host "Trying to unprotect password"
+            Write-Host "`tTrying to unprotect password"
             [byte[]] $unprotectedPassword = [System.Security.Cryptography.ProtectedData]::Unprotect($protectedPasswordBytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine);
+        
 
             # STRIP NULL BYTES
             for ($i = 0; $i -lt $unprotectedPassword.Length; $i++) {
@@ -321,11 +320,51 @@ function Unprotect-DomainPassword
             return $domainCreds
         }
         catch {
-            Write-Host "An error occurred: $($_) - Most likely you need to run this as the user who owns the password"
-            Write-Host "Trying a workaround to impersonate the target user with a scheduled task! This may take a few seconds..."
+            Write-Host "`tAn error occurred - Most likely you need to run this as the user who owns the password"
+            Write-Host "`tAttempting to impersonate the user via scheduled task..."
 
-            # TODO: WRITE OUT THE BYTES TO A FILE, SCHEDULE A TASK TO DO THE DECRYPTION, AND THEN READ THEM BACK IN 
-            return $domainCreds
+            # TODO: WRITE BYTES TO FILE
+            [string] $randomStr =  -join((65..90) +(97..122) | Get-Random -Count 10 | %{[char]$_})
+            $binFilePath = "C:\Users\Public\$($randomStr).bin"
+            $pwFilePath = "C:\Users\Public\$($randomStr).pw"
+            [System.IO.File]::WriteAllBytes($binFilePath, $protectedPasswordBytes);
+
+            # TODO: INVOKE COMMAND AS USER TO READ THE FILE, DECRYPT, WRITE TO FILE
+            <# COMMAND WOULD BE THIS: 
+            [bytes[]] $protectedPasswordBytes = [System.IO.File]::ReadAllBytes($binFilepath)
+            [bytes[]] $unprotectedPasswordBytes = [System.Security.Cryptography.ProtectedData]::Unprotect($protectedPasswordBytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine);
+            [string] $password = [System.Text.Encoding]::UTF8.GetString($unprotectedPasswordBytes);
+            [System.IO.File]::WriteAllText($pwFilePath, $password);
+            #>
+
+            # READ BYTES FROM FILE, DECRYPT, CONVERT TO STRING, AND WRITE OUT
+            $command = 'Add-type -AssemblyName System.Security;Add-type -AssemblyName System.Text.Encoding;';
+            $command = $command + '$protectedPasswordBytes = [System.IO.File]::ReadAllBytes("' + $binFilePath + '");';
+            $command = $command + '$unprotectedPasswordBytes = [System.Security.Cryptography.ProtectedData]::Unprotect($protectedPasswordBytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine);';
+            $command = $command + '$password = [System.Text.Encoding]::UTF8.GetString($unprotectedPasswordBytes);';
+            $command = $command + '[System.IO.File]::WriteAllText("' + $pwFilePath + '", $password);';
+            
+            # RUN THE COMMAND AS THE USER
+            Write-Host "Attempting to decrypt credentials as user $($domainCreds.LocalUserName)"
+            Invoke-RunPowershellAsUser -user $domainCreds.LocalUserName -command $command;
+
+            # SLEEP 15 SECONDS SINCE THE COMMAND IS ON A 10 SECOND DELAY
+            Start-Sleep 15;
+
+            # TODO: READ PASSWORD FROM A FILE
+            $passwordStr = [string] [System.IO.File]::ReadAllText($pwFilePath);
+            Write-Host "Got password: $($passwordStr)"
+            if ($passwordStr) {
+                $domainCreds.Password = $passwordStr;
+                $domainCreds.Complete = $true;
+            } else {
+                Write-Host "Failed to get password :(";
+            }
+
+            # CLEANUP
+            Remove-Item -Path $binFilePath
+            Remove-Item -Path $pwFilePath
+
         }
     } else {
         Write-Host "`tCould not find the start of the password field!"
@@ -377,7 +416,7 @@ for ($i = 0; $i -lt $ifaceFolders.Count; $i++) {
     Write-Host "Found full path to interface folder: $($fullPathToConfigs)`n";
 
     # FIND XML FILES
-    Write-Host "Found XML Files:";
+    Write-Host "Found XML File for WPA-PSK networks!:";
     $networkConfigs = Get-ChildItem $fullPathToConfigs;
 
     # LOOP THROUGH NETWORK CONFIGS IN WINDOWS DIR
@@ -430,11 +469,14 @@ New-PSDrive -Name HKU Registry HKEY_USERS;
 $users = Get-LocalUser;
 
 $hives = @( "HKCU", "HKLM");
+$userNames = @("", "");
 
 # MOUNT USERS REGISTRIES AS user:\
 foreach ($u in $users) {
     $user = New-Object System.Security.Principal.NTAccount($u.Name);
-    $hives += $u.name;
+    $userNames += $u.Name;
+
+    # TODO: THIS IS PROBABLY UNECESSARY
     $sid = $user.Translate([System.Security.Principal.SecurityIdentifier]).value;
     Write-Host "Found user $($u.Name) - $($sid)";
 
@@ -453,7 +495,10 @@ for ($a = 0; $a -lt $notFoundNetworks.Count; $a++) {
     [WifiNetwork] $network = $notFoundNetworks[$a];
         
     # LOOP THROUGH HIVES, AND CHECK EACH OF THE regKeys
+    $userNameIndex = 0;
     foreach ($hive in $hives) {
+
+        
         foreach ($key in $regKeys) {
                 
             $path = "$($hive)$($key)\{$($network.GUID)}"
@@ -475,17 +520,20 @@ for ($a = 0; $a -lt $notFoundNetworks.Count; $a++) {
                     $unprotectedKey = [System.Security.Cryptography.ProtectedData]::Unprotect($protectedKey, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine);
                     
                     # THEN, DECRYPT/DECIPHER IT FROM THE WEIRD FORMAT
-                    [DomainCreds] $domainCreds = Unprotect-DomainUsername -unprotectedBytes $unprotectedKey
-                    Write-Host $domainCreds
+                    # GET THE USERNAME OF THE CURRENT LOCAL USER
+                    $currentUserName = $userNames[$userNameIndex];
+                    Write-Host "Got username: $($userNames[$userNameIndex])"
+
+                    # UNPROTECT THE USERNAME AND PASSWORD
+                    [DomainCreds] $domainCreds = Unprotect-DomainUsername -unprotectedBytes $unprotectedKey -LocalUserName $currentUserName
                     $domainCreds = Unprotect-DomainPassword -unprotectedBytes $unprotectedKey -domainCreds $domainCreds
-                    Write-Host $domainCreds
+                    
+                    # CHECK THE RESULT OF THE DECRYPTED CREDS
                     if ($domainCreds.Domain) {
                         $network.DecryptedKey = "$($domainCreds.Domain)\$($domainCreds.Username):$($domainCreds.Password)"
                     } else {
                         $network.DecryptedKey = "$($domainCreds.Username):$($domainCreds.Password)"
                     }
-
-                    $network.Domain
 
                     $foundNetworks += $network
 
@@ -499,6 +547,7 @@ for ($a = 0; $a -lt $notFoundNetworks.Count; $a++) {
                 
             }
         }
+        $userNameIndex = $userNameIndex + 1
     }
         
 
