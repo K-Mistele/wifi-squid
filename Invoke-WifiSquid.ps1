@@ -19,12 +19,24 @@ class DomainCreds {
 
 # CLASS FOR NETWORK
 class WifiNetwork {
-    [string] $GUID
+
     [string] $SSID 
     [string] $DecryptedKey
+    [string] $GUID
     [WifiNetworkCredType] $CredType
     [string] $KeyMaterial
     [string] $IsProtected
+}
+
+# CLASS FOR ENTERPRISE WIFI NETWORK (REFERRED TO AS DOMAIN NETWORK)
+# NOTE THAT FOR MOST OF THE SCRIPT THE DATA LIVES IN A WifiNetwork, BUT AT THE END SWITCHES TO THIS FOR FORMATTING
+class EnterpriseWifiNetwork {
+    [string] $SSID 
+    [string] $Domain 
+    [string] $Username 
+    [string] $Password 
+    [string] $LocalUserName
+    [string] $GUID
 }
 
 # EXECUTE A FUNCTION AS ANOTHER USER, REQUIRES SYSTEM PRIVILEGES
@@ -44,7 +56,7 @@ function Invoke-RunPowershellAsUser {
 
     # CREATE A SCHEDULED TASK ACTION
     #$action = New-ScheduledtaskAction -Execute "powershell.exe -ExecutionPolicy Bypass -File `"$($pathToTaskFile)`""
-    $action = New-ScheduledtaskAction -Execute "powershell.exe" -Argument "-ep bypass -noexit $($pathToTaskFile)"
+    $action = New-ScheduledtaskAction -Execute "powershell.exe" -Argument "-ep bypass $($pathToTaskFile)"
 
     # FORMAT FOR TIME: 'MM/DD/YYYY HH:MM:SS PM'
     # BUILD IT TO EXECUTE 10 SECONDS IN THE FUTURE
@@ -285,7 +297,6 @@ function Unprotect-DomainUsername {
 # USE THE DPAPI TO PULL THE DOMAIN PASSWORD
 function Unprotect-DomainPassword
  {
-    [OutputType([DomainCreds])]
     param (
         [byte[]] $unprotectedBytes,
         [DomainCreds] $domainCreds
@@ -353,7 +364,6 @@ function Unprotect-DomainPassword
 
             # TODO: READ PASSWORD FROM A FILE
             $passwordStr = [string] [System.IO.File]::ReadAllText($pwFilePath);
-            Write-Host "Got password: $($passwordStr)"
             if ($passwordStr) {
                 $domainCreds.Password = $passwordStr;
                 $domainCreds.Complete = $true;
@@ -375,6 +385,7 @@ function Unprotect-DomainPassword
 
 # STORE NETWORKS
 [WifiNetwork[]] $foundNetworks = @();
+[EnterpriseWifiNetwork[]] $foundDomainNetworks = @();
 [WifiNetwork[]] $notFoundNetworks = @();
 
 Write-Host @"
@@ -461,6 +472,7 @@ for ($i = 0; $i -lt $ifaceFolders.Count; $i++) {
 
 }
 
+Write-Host "Mounting HKEY_USERS to HKU:\ (temporarily)"
 # MOUNT HKEY_USERS
 New-PSDrive -Name HKU Registry HKEY_USERS;
 
@@ -472,6 +484,7 @@ $hives = @( "HKCU", "HKLM");
 $userNames = @("", "");
 
 # MOUNT USERS REGISTRIES AS user:\
+Write-Host "Enumerating users whose hives to check..."
 foreach ($u in $users) {
     $user = New-Object System.Security.Principal.NTAccount($u.Name);
     $userNames += $u.Name;
@@ -525,17 +538,26 @@ for ($a = 0; $a -lt $notFoundNetworks.Count; $a++) {
                     Write-Host "Got username: $($userNames[$userNameIndex])"
 
                     # UNPROTECT THE USERNAME AND PASSWORD
-                    [DomainCreds] $domainCreds = Unprotect-DomainUsername -unprotectedBytes $unprotectedKey -LocalUserName $currentUserName
+                    $domainCreds = Unprotect-DomainUsername -unprotectedBytes $unprotectedKey -LocalUserName $currentUserName
                     $domainCreds = Unprotect-DomainPassword -unprotectedBytes $unprotectedKey -domainCreds $domainCreds
                     
-                    # CHECK THE RESULT OF THE DECRYPTED CREDS
+                    Write-Host "got domain credentials!"
+                    
+                    # CONVERT TO AN ENTERPRISE WIFI NETWORK AND ADD IT TO THE LIST FOR OUTPUT PURPOSES
+                    [EnterpriseWifiNetwork] $e = [EnterpriseWifiNetwork]::new();
+                    $e.GUID = $network.GUID
+                    $e.SSID = $network.SSID
+                    $e.Username = $domainCreds.Username 
+                    $e.Password = $domainCreds.Password
                     if ($domainCreds.Domain) {
-                        $network.DecryptedKey = "$($domainCreds.Domain)\$($domainCreds.Username):$($domainCreds.Password)"
+                        $e.Domain = $domainCreds.Domain
                     } else {
-                        $network.DecryptedKey = "$($domainCreds.Username):$($domainCreds.Password)"
+                        $e.Domain = '(No Domain)'
                     }
+                    $e.Domain = $domainCreds.Domain 
+                    $e.LocalUserName = $domainCreds.LocalUserName
 
-                    $foundNetworks += $network
+                    $foundDomainNetworks += $e
 
                 } catch {
                     Write-Host "`tFailed to Decrypt key! $($_)"
@@ -549,23 +571,13 @@ for ($a = 0; $a -lt $notFoundNetworks.Count; $a++) {
         }
         $userNameIndex = $userNameIndex + 1
     }
-        
-
-        
 
 }
 
 # PRINT THE NETWORKS WE FOUND
-for ($a = 0; $a -lt $foundNetworks.Count; $a++) {
-    [WifiNetwork] $network = $foundNetworks[$a]
-    Write-Host "Got key for network: $($network.SSID): $($network.DecryptedKey)";
-}
-Write-Host "";
+Write-Host "WPA-PSK Networks:"
+Format-Table -InputObject $foundNetworks
 
-# PRINT THE NETWORKS WE DIDN'T FIND
-for ($a = 0; $a -lt $notFoundNetworks.Count; $a++) {
-    [WifiNetwork] $network = $notFoundNetworks[$a]
-    Write-Host "Failed to get key for network $($network.SSID) :(";
-}
-
+Write-Host "WPA2-Enterprise Networks":
+Format-Table -InputObject $foundDomainNetworks
 
