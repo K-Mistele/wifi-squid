@@ -62,7 +62,7 @@ function Invoke-RunPowershellAsUser {
 
     # CREATE A SCHEDULED TASK ACTION
     #$action = New-ScheduledtaskAction -Execute "powershell.exe -ExecutionPolicy Bypass -File `"$($pathToTaskFile)`""
-    $action = New-ScheduledtaskAction -Execute "powershell.exe" -Argument "-ep bypass $($pathToTaskFile)"
+    $action = New-ScheduledtaskAction -Execute "powershell.exe" -Argument "-windowstyle hidden -ep bypass $($pathToTaskFile)"
 
     # FORMAT FOR TIME: 'MM/DD/YYYY HH:MM:SS PM'
     # BUILD IT TO EXECUTE 10 SECONDS IN THE FUTURE
