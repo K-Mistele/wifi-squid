@@ -343,7 +343,7 @@ function Unprotect-DomainPassword
         }
         catch {
             Write-Host "`tAn error occurred - Most likely you need to run this as the user who owns the password"
-            Write-Host "`tAttempting to impersonate the user via scheduled task..."
+            Write-Host "`tAttempting to impersonate the user via scheduled task. This will take a few seconds..."
 
             # TODO: WRITE BYTES TO FILE
             [string] $randomStr =  -join((65..90) +(97..122) | Get-Random -Count 10 | %{[char]$_})

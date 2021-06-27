@@ -23,3 +23,6 @@ Then, once we grab and decrypt all the credentials we can, print them out and ex
 
 ## TODO
 * rewrite it so everything is nice and readable (some syntax is inconsistent and the script is a mess - I'm not a big powershell guy and was kind of lazy)
+* add more error handling because why not
+* add command line arguments for generating output file
+* 
