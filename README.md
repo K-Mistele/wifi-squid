@@ -2,7 +2,7 @@
 A powershell tool to decrypt DPAPI-encrypted WiFi Passwords. This tool _must_ be run as `NT Authority\System`. Use Psexec I guess.
 
 ## How it Works
-This is a 10,000 foot overview that I typed up very quickly - check out my medium blog kylemistele.medium.com for a full write-up (soon after this tool is published)
+This is a 10,000 foot overview that I typed up very quickly - check out my medium blog kylemistele.medium.com for a full write-up. Link here: https://kylemistele.medium.com/dumping-stored-enterprise-wifi-credentials-with-invoke-wifisquid-5a7fe76f800
 
 ### WPA-PSK Passwords
 * WPA-PSK network passwords are stored in subdirectories of `C:\programdata\Microsoft\Wlansvc\Profiles\Interfaces`

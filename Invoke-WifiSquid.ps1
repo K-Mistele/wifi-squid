@@ -66,6 +66,7 @@ function Invoke-RunPowershellAsUser {
 
     # FORMAT FOR TIME: 'MM/DD/YYYY HH:MM:SS PM'
     # BUILD IT TO EXECUTE 10 SECONDS IN THE FUTURE
+    # TODO: MAKE INTO TIMESTAMP, ADD 5 SECONDS, THEN CONVERT BACK
     $timePrefix = Get-Date -Format "MM/dd/yyyy"
     $hours = [int] (Get-Date -Format "HH")
     $minutes = [int] (Get-Date -Format "mm")
